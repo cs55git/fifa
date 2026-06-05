@@ -1,0 +1,150 @@
+The following article is the inspriation for this project
+
+
+
+Part 1: Why Football Markets Create Exploitable Shocks
+
+Image
+The strategy does not predict goals. It waits for the market to overreact, then captures the statistical recovery.
+Here is the core insight the entire strategy is built on.
+When something happens in a football match, a goal, a red card, a missed penalty, the prediction market for that match reacts instantly and violently. A team priced at 50 cents can crash to 35 cents in under two minutes when the opponent scores. This is a price shock.
+But here is the part most traders miss. Many of these shocks overreact. The market panics, pushes the price too far, and then partially recovers as liquidity comes back in and cooler heads reprice the actual probability. That gap between the panic low and the recovery is the edge.
+The strategy does not try to predict goals. That is gambling. The strategy waits for a shock to happen, then enters at a mathematically determined depth, and captures the statistical recovery. You are not betting on the match. You are providing liquidity into a panic and getting paid for it.
+This works in football specifically because of three structural features.
+
+Football is low scoring, so every single goal is a massive probability event that moves prices hard. 
+
+Matches run 90 plus minutes with multiple tradeable events per game. 
+
+And the World Cup runs 104 matches in 39 days, giving you an enormous number of repeated opportunities to apply the same statistical edge.
+The question is not whether shocks happen. They happen constantly. The question is: when a shock happens, how deep will it go, and where exactly should you place your buy orders to capture the recovery?
+That is what the rest of this strategy answers with precision.
+A shock is detected when, inside a sliding two minute window, the price drops at least 15 percent from the window's peak to its floor, the absolute drop is at least 8 cents, and the shock is not within a three minute cooldown of a previous shock. The 8 cent minimum prevents noise at very low prices. The cooldown prevents double counting the same event.
+python
+def detect_shock(window_trades):
+    peak = max(t.price for t in window_trades)
+    floor = min(t.price for t in window_trades)
+    drop_pct = (peak - floor) / peak
+    drop_abs = peak - floor
+
+    if drop_pct >= 0.15 and drop_abs >= 0.08:
+        return {"shock": True, "peak": peak, "floor": floor,
+                "depth": peak - floor}
+    return {"shock": False}
+Part 2: The Five Dimension Classification System
+
+This is the heart of the strategy and the part that separates it from naive shock trading.
+Image
+Every shock is classified across five independent dimensions into one precise state of the world.
+Not all shocks are equal. A shock in a tied Champions League match at minute 30 behaves completely differently from a shock in a 3-0 blowout in injury time. If you treat them the same, you lose. The strategy captures this by classifying every shock across five independent dimensions, then building separate historical distributions for each unique combination.
+Dimension 1: League Tier. 
+Major leagues like the EPL, Champions League, and La Liga have deep liquidity and predictable recovery patterns. Minor leagues are thinner and more erratic. Shocks are labeled deep for major leagues, thin for minor ones, and unknown otherwise. The classifier checks the market slug for known league identifiers.
+Dimension 2: Favoritism. 
+This captures how favored the team was just before the shock, based on the pre shock price which represents implied probability. A team at 85 cents and above is a heavy favorite. 75 to 85 is moderate. 60 to 75 is slight. 45 to 60 is the coin flip zone, labeled balanced. Below 45 is the underdog. A heavily favored team that gets shocked recovers very differently from an underdog that gets shocked.
+Dimension 3: Order Book Depth. 
+This describes how liquidity is distributed in the book at the moment of the shock. The classifier sums the top three bid sizes and divides by total bid size. If 70 percent or more sits in the top three levels, the book is top heavy, meaning thin support below and shocks go deep. 50 to 70 percent is balanced. Below 50 percent is deep liquidity with strong support and shallow shocks.
+Dimension 4: Match Time. 
+Early shocks in the first 15 minutes often reverse because the market overreacts to early events. Mid match shocks between 15 and 60 minutes carry the most volume. Late match shocks between 60 and 80 minutes are the most volatile. Final phase shocks past 80 minutes are often permanent because the game is nearly decided.
+Dimension 5: Goal State. 
+The score at the moment of the shock fundamentally changes everything. The classifier computes the absolute goal difference. A level game where the score is tied means every goal is critical and shocks tend to recover. A one goal difference is close. Two goals is comfortable. Three or more is a blowout where shocks are usually permanent because the losing team has no realistic path back.
+When a shock fires, all five classifiers run and combine into a single bucket key. Here is exactly what a typical bucket key looks like:
+python
+def bucket_key(shock):
+    return f"{classify_league(shock.slug)}|" \
+           f"{classify_favoritism(shock.pre_price)}|" \
+           f"{classify_depth(shock.bids)}|" \
+           f"{classify_time(shock.elapsed_ms)}|" \
+           f"{classify_goal(shock.goal_diff)}"
+
+# Example output:
+# "deep|underdog|balanced|mid|level"
+That key, deep underdog balanced mid level, is a complete description of the state of the world at the instant of the shock. It reads as a major league, underdog team, balanced order book, mid match, tied score. There are 720 possible combinations. In practice around 200 have enough data to trade. This key is how the strategy looks up exactly how deep this specific type of shock has historically gone.
+Part 3: Getting the Data and Building Historical Distributions
+
+This is where the strategy becomes genuinely quantitative. But before you can build a single distribution, you need historical football match data from Polymarket. This is the part most people get stuck on, so let me save you the time.
+Image
+For every bucket, the strategy knows exactly how deep shocks have historically gone.
+The cleanest source I found for this is Dome, a unified API for prediction markets. It gives you real time and historical data across both Polymarket and Kalshi through a single integration, including full historical order book snapshots, candlestick data, and trade history that is not available through the native platform APIs. It was built specifically for backtesting and trading bots, the founders came out of Alchemy, and Polymarket actually acquired them in early 2026. There is a free tier to get started. This is exactly the kind of data layer you need to build your shock distributions, and it removes the single biggest headache in this entire build. 
+Image
+It is acquired by Polymarket now.
+Once you have the historical trade data, the engine itself is straightforward.
+For every historical shock, the strategy records one critical number: the shock depth in cents, calculated as the pre shock price minus the floor price. If the price was at 50 cents and crashed to 35, the depth is 15 cents.
+Every shock depth gets filed under its bucket key into a sorted array. Then the strategy computes the percentiles of that distribution: the 50th, 75th, 90th, and 95th percentiles using linear interpolation.
+Here is what those percentiles mean in plain terms. Take the bucket deep underdog balanced mid level with these sorted historical depths in cents: 4, 5, 6, 7, 8, 10, 12, 15, 20, 25.
+The P50 is 9 cents, meaning half of all shocks in this exact bucket were shallower than 9 cents. The P75 is 14 cents. The P90 is 21 cents. The P95 is 23 cents, meaning only 5 percent of shocks in this bucket ever went deeper than 23 cents.
+This is the entire edge expressed as numbers. Instead of guessing where to buy, the strategy knows the historical depth distribution for this precise type of shock and places orders accordingly.
+python
+import numpy as np
+
+def compute_percentiles(depths):
+    sorted_depths = np.sort(depths)
+    return {
+        50: np.percentile(sorted_depths, 50),
+        75: np.percentile(sorted_depths, 75),
+        90: np.percentile(sorted_depths, 90),
+        95: np.percentile(sorted_depths, 95),
+    }
+If a bucket has fewer than 5 historical shocks, the strategy does not trust the data and falls back to conservative defaults: 6 cents at P50, 9 at P75, 13 at P90, 18 at P95. These are deliberately shallow so the bot does not place aggressive orders on thin data. A bucket with 3 shocks is not a distribution. It is noise. This single rule prevents the most common way systematic shock strategies blow up.
+Part 4: The Laddered Limit Order Strategy
+
+Now you know how deep the shock is likely to go. The question is how to enter.
+Image
+Four limit orders at increasing depth, with heavier weight toward the deepest, best priced levels.
+The strategy does not place a single buy order. It places four laddered limit buy orders at increasing depths, with increasing weight toward the deeper levels. The logic is simple. Shallow orders fill often but capture less recovery. Deep orders fill rarely but capture the best price and the largest recovery.
+Each limit price is the pre shock price minus the corresponding percentile depth:
+The P50 order sits at the shallowest depth and gets 10 percent of capital. It is a scout position that fills frequently. The P75 order gets 20 percent. The P90 order gets 30 percent and sits at a deep, better price that fills less often. The P95 order gets 40 percent, the deepest and best price, rarely filled but heaviest allocation because when it fills, the recovery is largest.
+python
+def build_ladder(pre_price, percentiles, capital):
+    weights = {50: 0.10, 75: 0.20, 90: 0.30, 95: 0.40}
+    orders = []
+    for pct, weight in weights.items():
+        limit_price = pre_price - percentiles[pct]
+        size = capital * weight
+        orders.append({"price": round(limit_price, 2), "size": size})
+    return orders
+Orders stay active for 60 seconds. If the price touches a level, that order fills. The exit is a fixed target recovery, typically around 4 cents, where you sell back into the bounce.
+The deeper the order that fills, the more the market overreacted, and the larger the expected recovery. This is why the weighting increases with depth. You are allocating the most capital to the scenario where the edge is largest.
+
+This is also where the real tuning happens, and where I want you to experiment. The weighting and the percentile bands above are a strong starting point, but they are not the only configuration. When I backtested this, I found that filtering for the deeper bucket ranges, specifically the moderate_fav, was significantly more profitable than trading every bucket equally.
+Image
+moderate_fav is 75-85
+I strongly recommend backtesting across multiple bucket key combinations and multiple percentile ranges like 75 to 100 and 80 to 100 to find which segments deliver the highest win rate on your data. The strategy is a framework, not a fixed recipe. The traders who tune it carefully will pull out meaningfully higher win rates than the ones who run it stock. Backtest aggressively before kickoff.
+Part 5: The Complete Worked Example and How to Build It
+
+Let me run the entire strategy on one real scenario start to finish.
+Image
+Detect, classify, look up, ladder, capture. Repeated across every match of the tournament.
+The match is an EPL fixture. Current minute is 35, mid first half. The score is 0-0. Manchester United's win price is at 30 cents, making them the underdog. The order book is balanced.
+Step 1, shock detected. The price crashes from 30 cents to 20 cents within two minutes. That is a 33 percent drop and a 10 cent absolute drop. Both thresholds exceeded. Shock confirmed.
+Step 2, classify the bucket. League is deep because the slug contains epl. Favoritism is underdog because 30 cents is below 45. Depth is balanced. Time is mid because 35 minutes falls in the 15 to 60 window. Goal state is level because the score is tied. The bucket key is deep underdog balanced mid level.
+Step 3, look up the distribution. This bucket has 28 historical shocks. The percentiles are P50 at 8 cents, P75 at 12, P90 at 16, P95 at 20.
+Step 4, place the ladder. With pre shock price at 30 cents:
+P50 limit = 0.30 - 0.08 = 0.22  ($5 size)
+P75 limit = 0.30 - 0.12 = 0.18  ($10 size)
+P90 limit = 0.30 - 0.16 = 0.14  ($15 size)
+P95 limit = 0.30 - 0.20 = 0.10  ($20 size)
+Step 5, fill and exit. The price drops to 14 cents. The P90 order fills. You now own roughly 107 shares at 14 cents for a 15 dollar cost basis. The price recovers 4 cents to 18 cents. Your target hits. Proceeds are 107 times 0.18, which is 19.26 dollars. Profit is 4.26 dollars, a 28.4 percent return on that fill.
+That is the entire loop. Detect, classify, look up, ladder, capture the recovery. Repeat across hundreds of World Cup matches.
+How to build it in the next nine days. 
+Pull historical Polymarket football data using the Dome API described in Part 3. Run the shock detection across every match to build your distribution file. Classify every detected shock into its bucket and compute the percentiles. That gives you the historical engine. Then connect the live order book, run the same detection in real time, and fire the laddered limit orders when a shock matches a bucket you have data for. Always start in paper trading mode before committing real capital, and backtest across multiple bucket ranges to find your most profitable segments first.
+The bot has four components. 
+A data ingestion layer that pulls and cleans trade data from Dome. 
+A distribution builder that processes history into bucket percentiles. 
+A live shock detector that runs the same logic in real time. 
+And an execution layer that places and manages the laddered orders. 
+All four are in the repository.
+If you want the full GitHub repo to fork and build on for the World Cup, drop a comment or hit my DMs and I will send it over. I will be posting live trades and updates throughout the entire tournament, so follow along if you want to trade this with me. And if you know a trader who is sharp at this kind of systematic execution, share this with them, because this strategy gets stronger the more people stress test it before kickoff.
+The Summary
+
+The World Cup is the largest opportunity prediction markets have ever created. 104 matches, hundreds of simultaneous markets, 39 days of continuous in play volatility, and over $1.4 billion already sitting in the winner market before a single ball is kicked.
+The strategy is not about predicting goals. It is about waiting for the market to overreact to a shock, measuring exactly how deep that specific type of shock has historically gone using a five dimension classification system, and placing laddered limit orders that capture the statistical recovery.
+Detect the shock. Classify it across league, favoritism, depth, time, and goal state. Look up the historical depth distribution for that exact bucket. Ladder your orders from P50 to P95 with increasing weight. Capture the recovery. Repeat across the entire tournament. And tune your bucket ranges through aggressive backtesting to push your win rate higher.
+You have nine days to build this, backtest it on historical Dome data, and have it running live for kickoff on June 11.
+The repo is ready. The math is proven. The tournament is coming.
+Here is the question I want you to sit with.
+The entire edge in this strategy comes from the market overreacting to shocks and then recovering. But during the World Cup, with billions in fresh volume and thousands of new traders flooding in, will those overreactions get larger because of all the inexperienced money, or will they get smaller because of all the new liquidity?
+Your answer determines whether you size up or size down during the tournament.
+Drop your answer in the comments. 
+Repost this if you are trading the World Cup. 
+And if you want the repo, let me know below.
+There is no wrong answer. But there are very revealing ones.
