@@ -1,0 +1,22 @@
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Data artifacts
+*.duckdb
+*.duckdb.wal
+distributions.json
+data_store.duckdb
+
+# OS
+.DS_Store
